@@ -5,6 +5,7 @@ date: "10/2/2018"
 output: html_document
 ---
 
+
 ###Open a browser and log into RStudio 
 ```{r Libraries, eval = FALSE}
 #load libraries

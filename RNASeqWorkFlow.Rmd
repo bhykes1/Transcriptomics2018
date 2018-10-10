@@ -4,6 +4,8 @@ author: "Barry L Hykes Jr"
 date: "10/2/2018"
 output: html_document
 ---
+
+
 #Introduction
 This workshop will be an overview of an RNASeq workflow using widely accepted analysis techniques. We will perform a case study examining gene knockout of Atg5 in macrophages of B6 mice.  
 
