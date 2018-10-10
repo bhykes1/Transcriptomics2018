@@ -1,0 +1,192 @@
+---
+title: "RNASeq WorkFlow"
+author: "Barry L Hykes Jr"
+date: "10/2/2018"
+output: html_document
+---
+
+###Open a browser and log into RStudio 
+```{r Libraries, eval = FALSE}
+#load libraries
+library("phyloseq"); packageVersion("phyloseq")
+library("DESeq2"); packageVersion("DESeq2")
+library("ggplot2"); packageVersion("ggplot2")
+library("ggrepel"); packageVersion("ggrepel")
+library("data.table"); packageVersion("data.table")
+```
+
+Read HTSeq output into DESeq2
+###The following commands are adopted from the [DESeq2](https://bioconductor.org/packages/release/bioc/manuals/DESeq2/man/DESeq2.pdf) manual
+
+####First we need to read in the files
+```{r DESeq, eval=FALSE}
+directory <- "/home/genomics/workshop_materials/Transcriptomics/Counts/"
+sampleFiles <- list.files(path=directory,patter=".txt")
+sampleFiles
+```
+
+####Now read in your metadata from the "Conditions.txt" file
+```{r, eval = FALSE}
+sampleCondition<- read.table("/home/genomics/workshop_materials/Transcriptomics/Conditions.txt",head=TRUE) #file with sample data to be compared
+sampleCondition
+
+sampleCondition <- sampleCondition[order(sampleCondition$SampleID),] #We need to order this table by SampleID before merging with the sampleFiles
+sampleCondition
+```
+
+####combine sample data into a data frame with file names
+```{r, eval = FALSE}
+sampleTable <- data.frame(sampleName = sampleFiles, fileName = sampleFiles, condition = sampleCondition)
+sampleTable #verify that the "fileName" column matches the condition.SampleID column
+```
+
+####Now we have our metadata formatted in a way that can be used by DESeq2, but we need to create a data matrix that can be used by the DESeq function
+```{r, eval = FALSE}
+ddsCounts <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable, directory = directory, design = ~ condition.condition) #creates DESEqDataSet for DESeq function
+```
+
+PAUSE 🛑
+------------------------------------------------- 
+
+####Before we run the DESeq function, we need to do a final quality control step to make sure there are no batch effects or outliers
+```{r, eval = FALSE}
+#The data first need to be transformed using the variance stabilizing transformation
+vsd <- vst(ddsCounts, blind=FALSE) #variance stabilizing transformation
+pcaData <- plotPCA(vsd, intgroup=c("condition.condition"),returnData=TRUE)
+percentVar <- round(100 * attr(pcaData,"percentVar"))
+head(pcaData)
+
+ggplot(pcaData, aes(PC1, PC2, color=condition.condition))+
+  geom_text(mapping = aes(label = name),size=2.5)+
+  geom_point(size=2.5) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  xlim(-25,25)+
+  coord_fixed()
+```
+
+####We can see that the sample "CGCAATTC.txt" performs drastically differently than the rest of the samples, so we need to remove it
+```{r, eval = FALSE}
+vsd2 <- vsd[,vsd$condition.SampleID != "CGCAATTC.txt"]
+
+pcaData2 <- plotPCA(vsd2, intgroup=c("condition.condition"),returnData=TRUE)
+percentVar <- round(100 * attr(pcaData2,"percentVar"))
+head(pcaData2)
+
+ggplot(pcaData2, aes(PC1, PC2, color=condition.condition))+
+  #geom_text(mapping = aes(label = name),size=1.5)+
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+```
+
+####now we have to remove the outlier(s) from the dds counts matrix since this is what the DESeq function will be run on
+```{r, eval = FALSE}
+ddsCounts2 <- ddsCounts[,ddsCounts$condition.SampleID != "CGCAATTC.txt"]
+
+#Now we can run the differential expression analysis
+dds <- DESeq(ddsCounts2) #DESeq2 command for differential expression test
+```
+
+####Extracting DESeq2 Results
+Below is a description of the column headers that will appear in the DESeq2 results table:
+ * Basemean - mean of normalized counts for all samples
+ * log2foldchange
+ * lfcse - standard error
+ * stat - wald statistic (log2foldchange / lfcse)
+ * pvalue 
+ * padj - pvalue adjusted for false discovery
+####Warning: 
+You MUST resist the temptation to use the p-value when evaluating DESeq2 results. The adjusted p-value (padj) accounts for multiple hypothesis testing 
+```{r DESeq Results, eval=FALSE}
+#text file with ensembl ID's and corresponding gene names
+mmGenes = read.table("/home/genomics/workshop_materials/Transcriptomics/MouseGeneTable.txt", header=TRUE, row.names = 1)
+mmGenes = as.matrix(mmGenes) #I convert the data frame to a matrix to get a downstream function, cbind, to work properly
+head(mmGenes)
+```
+
+####extract results table from DESeq2
+```{r, eval = FALSE}
+res <- results(dds)
+res.dds <- res[order(res$padj),] #order table by adj p value
+summary(res.dds) #lets take a look at how many genes are up-regulated/down-regulated
+  
+  # Quick check of factor levels
+mcols(res.dds, use.names = TRUE) #this is important for results interpretation
+```
+
+We can add the gene names to the results by merging the mmGenes table with the res.dds table
+```{r, eval = FALSE}
+res.dds = cbind(as(res.dds, "data.frame"), Gene_Name = as(mmGenes[rownames(res.dds), ],"matrix"))
+head(res.dds)
+```
+
+####Make a new object to add significance boolean for plotting
+```{r, eval = FALSE}
+resdt.dds = data.table(as(res.dds, "data.frame"),
+                 keep.rownames = TRUE)
+setnames(resdt.dds, "rn", "Ensembl_ID") 
+
+resdt.dds
+resdt.dds[, Significant := padj < .1]
+resdt.dds[!is.na(Significant)]
+resdt.dds
+  
+write.table(res.dds,file="/home/genomics/workshop_materials/Transcriptomics/FF_vs_Cre.DESeq.out.txt",quote=F,sep="\t")
+```
+
+####make rnk table for Gene Set Enrichment Analysis
+```{r, eval = FALSE}
+RNK = data.table(Gene_Name = res.dds$Gene_Name, stat = res.dds$stat) #These are 2 columns from our deseq2 output that we need for GSEA
+RNK = subset(RNK, stat != "NA")
+head(RNK)
+write.table(RNK, "/home/genomics/workshop_materials/Transcriptomics/FF_vs_Cre.DESeq.rnk",quote=F,sep="\t", row.names = F)
+  
+```
+
+Volcano plots are a good way of visualizing the effects of the experimental conditions on the cells
+```{r Volcano Plot, eval = FALSE}
+volcano = ggplot(
+    data = resdt.dds[!is.na(Significant)],
+    mapping = aes(x = log2FoldChange,
+                  y = -log10(padj),
+                  color = Significant,
+                  label = Ensembl_ID, label1 = Gene_Name)) +
+    theme_bw() +
+    geom_point() + 
+    geom_point(data = resdt.dds[(Significant)], size = 7, alpha = 0.7) + #Larger circles for the significant values
+    theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) +
+    geom_hline(yintercept = -log10(.1)) +
+    ggtitle("DESeq2 Negative Binomial Test Volcano Plot \nProximal Colon Abx vs no Abx") +
+    theme(axis.title = element_text(size=12)) +
+    theme(axis.text = element_text(size=12)) +
+    theme(legend.text = element_text(size=12)) +
+    geom_vline(xintercept = 0, lty = 2)
+volcano
+volcano + xlim(-7,7) #xlim isn't necessary, but I add it here to make the plot symmetrical about the y axix
+summary(resdt.dds)
+
+save.image("./Transcriptomics.RData") #it's to to save the image so all the object that have been initiated can be accessed at any time
+```
+
+After running GSEA, we may want to make some heat maps. To do that we need to merge HTSeq counts files with Gene list file to make a counts table
+```{r, eval = FALSE}
+counts = mmGenes #initialize counts table as gene list with gene names and ensemble IDs
+#subset sampleFiles to remove the outlier we removed earlier
+sampleFiles
+
+#iterate over each HTSeq file
+for(i in 1:length(sampleFiles)){ 
+  file <- read.table(paste(directory,sampleFiles[i],sep=""),header=FALSE,sep="\t",row.names = 1)
+
+  colnames(file) = c(sub('\\.txt$', '', sampleFiles[i])) #add the file name minus the ".txt" suffix to the header so we can identify each column
+  
+  dat = subset(file, !(row.names(file)%in%c("__no_feature","__ambiguous","__too_low_aQual","__not_aligned","__alignment_not_unique"))) #remove the extra fields from the counts table
+  
+ counts = cbind(as(counts,"matrix"),as(dat,"data.frame")) #each time the loop iterates, it will add a new column for the file's counts
+  
+}
+head(counts)
+write.table(counts,"/home/genomics/workshop_materials/Transcriptomics/CountsTable.txt",quote=F,sep="\t")
+```
